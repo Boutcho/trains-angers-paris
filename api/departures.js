@@ -1,6 +1,9 @@
 // ============================================================
 //  Tableau de bord : renvoie les trajets d'un sens à la page.
-//  Utilise la brique partagée _sncf.js (trajets fiables).
+//  Options via l'URL :
+//    ?dir=angers-paris | paris-angers
+//    ?count=40           (nombre de trains, défaut 20)
+//    ?full=1             (inclure les trains déjà partis aujourd'hui)
 // ============================================================
 const { getTrains } = require("./_sncf");
 
@@ -13,9 +16,11 @@ module.exports = async function handler(req, res) {
   if (!KEY) { res.status(500).json({ error: "Clé SNCF non configurée sur le serveur." }); return; }
 
   const dir = req.query.dir === "paris-angers" ? "paris-angers" : "angers-paris";
+  const count = Math.min(Math.max(parseInt(req.query.count) || 20, 1), 50);
+  const sinceMidnight = req.query.full === "1";
 
   try {
-    const trains = await getTrains(dir, KEY);
+    const trains = await getTrains(dir, KEY, { count, sinceMidnight });
     const lateCount = trains.filter(t => t.delayMin > 0 || t.cancelled).length;
     res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=30");
     res.status(200).json({ trains, lateCount });

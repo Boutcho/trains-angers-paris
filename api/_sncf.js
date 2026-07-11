@@ -24,18 +24,35 @@ function parseSncfDate(s) {
   );
 }
 
-// Récupère les prochains trajets d'Angers→Paris ou Paris→Angers.
+// Récupère les trajets d'Angers→Paris ou Paris→Angers.
 // Renvoie une liste simplifiée : horaire prévu, horaire réel,
 // retard en minutes, numéro de train, statut.
-async function getTrains(dir, key) {
+//
+// Paramètres optionnels (opts) :
+//   count         : nombre de trajets (défaut 20)
+//   sinceMidnight : si true, part de minuit du jour courant pour
+//                   inclure les trains DÉJÀ PARTIS (rattrapage de saisie).
+async function getTrains(dir, key, opts = {}) {
   const from = dir === "paris-angers" ? GARES.paris : GARES.angers;
   const to   = dir === "paris-angers" ? GARES.angers : GARES.paris;
 
-  // On demande jusqu'à 12 trajets à venir, avec données temps réel.
+  const count = opts.count || 20;
+
+  // Point de départ dans le temps : soit maintenant (prochains trains),
+  // soit minuit aujourd'hui (pour voir aussi les trains déjà partis).
+  let datetimeParam = "";
+  if (opts.sinceMidnight) {
+    const now = new Date();
+    const y = now.getFullYear();
+    const mo = String(now.getMonth() + 1).padStart(2, "0");
+    const d = String(now.getDate()).padStart(2, "0");
+    datetimeParam = `&datetime=${y}${mo}${d}T000000`;
+  }
+
   const url = `https://api.sncf.com/v1/coverage/sncf/journeys`
             + `?from=${from}&to=${to}`
-            + `&datetime_represents=departure`
-            + `&count=12&data_freshness=realtime`;
+            + `&datetime_represents=departure${datetimeParam}`
+            + `&count=${count}&data_freshness=realtime`;
 
   const res = await fetch(url, {
     headers: { "Authorization": "Basic " + Buffer.from(key + ":").toString("base64") },
