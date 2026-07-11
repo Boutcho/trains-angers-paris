@@ -58,6 +58,7 @@
   .delay-cell .val.late-soft { background:rgba(255,138,61,.14); color:var(--orange); }
   .delay-cell .val.cancel { background:rgba(255,77,94,.22); color:var(--red); }
   .delay-cell .etat { display:block; font-size:10px; color:var(--ink-dim); margin-top:5px; letter-spacing:.5px; text-transform:uppercase; }
+  .delay-cell .cause { display:block; font-size:11px; color:var(--ink-dim); margin-top:5px; line-height:1.3; max-width:150px; }
 
   /* Pictogramme discret de réservation */
   .pico { width:30px; height:30px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--ink-dim); cursor:pointer; font-size:16px; line-height:1; display:inline-flex; align-items:center; justify-content:center; transition:all .12s ease; }
@@ -90,6 +91,8 @@
   .trip-row input.fix { width:100%; text-align:center; padding:6px; font-size:13px; }
   .trip-row .del { background:transparent; border:none; color:var(--ink-dim); cursor:pointer; font-size:18px; }
   .trip-row .del:hover { color:var(--red); }
+  .trip-cause { font-size:12px; color:var(--ink-dim); margin-top:5px; }
+  .trip-cause .cause-ico { color:var(--orange); font-style:normal; margin-right:4px; }
   .hint { font-size:12px; color:var(--ink-dim); background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--amber); padding:12px 14px; border-radius:8px; margin-bottom:16px; line-height:1.6; }
   .hidden { display:none; }
 </style>
@@ -242,7 +245,7 @@ async function syncReservedDelays() {
     try {
       await fetch("/api/trajets", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ action:"rafraichir", mois, id:uid, delaySncf:t.delaySncf, etat:t.etat })
+        body: JSON.stringify({ action:"rafraichir", mois, id:uid, delaySncf:t.delaySncf, etat:t.etat, cause:t.cause })
       });
     } catch(e) {}
   }
@@ -305,6 +308,10 @@ function buildLiveRow(t, now) {
       delayHtml = `<span class="val ontime">À L'HEURE</span><span class="etat">${ETAT_LABEL[t.etat]||""}</span>`;
     }
   }
+  // Cause du retard (si l'API en fournit une)
+  if (t.cause && (t.delayPertinent > 0 || t.cancelled)) {
+    delayHtml += `<span class="cause">${escapeHtml(t.cause)}</span>`;
+  }
 
   // clé unique du train pour savoir s'il est déjà réservé
   const uid = `${currentDir}:${t.trainNo}:${(t.baseTime||"").slice(0,8)}`;
@@ -320,6 +327,7 @@ function buildLiveRow(t, now) {
     dir: currentDir, trainNo: t.trainNo, baseTime: t.baseTime,
     delaySncf: t.delayG30 || 0,   // <-- retard d'arrivée, la valeur G30
     etat: t.etat, cancelled: !!t.cancelled,
+    cause: t.cause || null,       // cause conservée dans le carnet
   };
 
   return `<div class="row ${isPast?'past':''}">
@@ -349,6 +357,9 @@ async function bookTrain(uid) {
 }
 
 function fmt(s) { return s ? `${s.slice(9,11)}:${s.slice(11,13)}` : "—"; }
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 function stamp() { document.getElementById("lastUpdate").textContent = "Mis à jour " + new Date().toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit",second:"2-digit"}); }
 function setDot(live) { document.getElementById("liveDot").classList.toggle("stale", !live); }
 
@@ -426,8 +437,9 @@ function renderMonth(data) {
     const badgeCls = counts ? "counts" : "nocounts";
     const sncfTxt = t.cancelled ? "SUPPR." : `+${t.delaySncf||0}`;
     const manuelVal = (t.delayManuel !== null && t.delayManuel !== undefined) ? t.delayManuel : "";
+    const causeHtml = t.cause ? `<div class="trip-cause"><i class="cause-ico">⚠</i> ${escapeHtml(t.cause)}</div>` : "";
     return `<div class="trip-row">
-      <div class="lbl">${sens}<div class="sub">${fmt(t.baseTime)} · Train ${t.trainNo} ${counts?'· comptabilisé':'· non comptabilisé (≤15 min)'}</div></div>
+      <div class="lbl">${sens}<div class="sub">${fmt(t.baseTime)} · Train ${t.trainNo} ${counts?'· comptabilisé':'· non comptabilisé (≤15 min)'}</div>${causeHtml}</div>
       <div class="delay-badge ${badgeCls}">${sncfTxt}</div>
       <div><input class="fix" type="number" min="0" placeholder="${t.delaySncf||0}" value="${manuelVal}" data-id="${t.id}"></div>
       <button class="del" data-id="${t.id}" title="Retirer">×</button>

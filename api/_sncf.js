@@ -65,6 +65,12 @@ async function getTrains(dir, key, opts = {}) {
 
   const data = await res.json();
   const journeys = data.journeys || [];
+  // Les perturbations sont dans un tableau à part, reliées aux trajets
+  // par identifiant. On les indexe par id pour un accès rapide.
+  const disruptionsById = {};
+  for (const d of (data.disruptions || [])) {
+    if (d.id) disruptionsById[d.id] = d;
+  }
   const trains = [];
   const maintenant = new Date();
 
@@ -127,6 +133,9 @@ async function getTrains(dir, key, opts = {}) {
     const status = (info.status || j.status || "").toLowerCase();
     const cancelled = status.includes("delet") || status.includes("no_service");
 
+    // --- Cause du retard (si disponible dans les perturbations) ---
+    const cause = extraireCause(j, section, disruptionsById);
+
     trains.push({
       trainNo: info.headsign || info.trip_short_name || "—",
       // départ
@@ -137,6 +146,8 @@ async function getTrains(dir, key, opts = {}) {
       baseArrTime: baseArr,
       realArrTime: realArr,
       delayArr: (delayArr === null) ? null : Math.max(0, delayArr),
+      // cause du retard (texte lisible ou null)
+      cause,
       // synthèse "colonne intelligente"
       etat,                       // a_venir | en_route | arrive
       natureRetard,               // depart | en_route | arrivee
@@ -156,6 +167,72 @@ function diffMinutes(base, real) {
   const b = parseSncfDate(base), r = parseSncfDate(real);
   if (!b || !r) return null;
   return Math.round((r - b) / 60000);
+}
+
+// Extrait un texte de cause lisible pour un trajet.
+// Stratégie, du plus précis au plus général :
+//   1) le message rédigé par la SNCF dans la perturbation liée (vraie cause)
+//   2) à défaut, le libellé de sévérité ("retard important" -> "Retard signalé")
+//   3) sinon null (rien à afficher)
+function extraireCause(journey, section, disruptionsById) {
+  // Rassembler les liens de perturbation présents sur le trajet et la section.
+  const liens = []
+    .concat(journey.links || [])
+    .concat(section.links || [])
+    .concat((section.display_informations || {}).links || []);
+
+  const dispSet = new Set();
+  for (const l of liens) {
+    if (l && (l.type === "disruption" || l.rel === "disruptions") && l.id) {
+      dispSet.add(l.id);
+    }
+  }
+
+  // Chercher un message texte dans les perturbations liées.
+  for (const id of dispSet) {
+    const d = disruptionsById[id];
+    if (!d) continue;
+    const msg = premierMessage(d);
+    if (msg) return nettoyer(msg);
+  }
+
+  // Repli : libellé de sévérité de la première perturbation liée.
+  for (const id of dispSet) {
+    const d = disruptionsById[id];
+    if (!d) continue;
+    const sev = (d.severity && (d.severity.name || d.severity.effect)) || "";
+    const label = libelleSeverite(sev);
+    if (label) return label;
+  }
+
+  return null;
+}
+
+// Récupère le premier message texte d'une perturbation.
+function premierMessage(d) {
+  const msgs = d.messages || [];
+  for (const m of msgs) {
+    const t = (m && (m.text || (m.channel && m.text))) || "";
+    if (t && t.trim()) return t;
+  }
+  return null;
+}
+
+// Transforme un code de sévérité en libellé court et lisible.
+function libelleSeverite(sev) {
+  const s = (sev || "").toLowerCase();
+  if (!s) return null;
+  if (s.includes("delay") || s.includes("retard")) return "Retard signalé";
+  if (s.includes("delet") || s.includes("suppr") || s.includes("no_service")) return "Train supprimé";
+  if (s.includes("modified") || s.includes("detour")) return "Trajet modifié";
+  return "Perturbation signalée";
+}
+
+// Nettoie un message SNCF : enlève le HTML éventuel, coupe si trop long.
+function nettoyer(txt) {
+  let t = String(txt).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  if (t.length > 120) t = t.slice(0, 117).trim() + "…";
+  return t;
 }
 
 module.exports = { getTrains, parseSncfDate, GARES };

@@ -88,12 +88,13 @@ async function supprimerTrajet(mois, id) {
 // (utile quand on a réservé un train pas encore arrivé : sa valeur
 // d'arrivée définitive n'était pas encore connue). Ne touche PAS
 // au retard manuel s'il a été saisi.
-async function rafraichirRetardSncf(mois, id, delaySncf, etat) {
+async function rafraichirRetardSncf(mois, id, delaySncf, etat, cause) {
   const liste = await lireMois(mois);
   const t = liste.find(x => x.id === id);
   if (t) {
     t.delaySncf = Number(delaySncf) || 0;
     if (etat) t.etat = etat;
+    if (cause !== undefined && cause !== null && cause !== "") t.cause = cause;
     await ecrireMois(mois, liste);
   }
   return liste;

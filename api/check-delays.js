@@ -51,7 +51,8 @@ module.exports = async function handler(req, res) {
     for (const dir of ["angers-paris", "paris-angers"]) {
       const trains = await getTrains(dir, KEY);
       for (const t of trains) {
-        const bigDelay = t.delayMin >= SEUIL_MINUTES || t.cancelled;
+        // Alertes basées sur le retard AU DÉPART (anticipation avant le départ).
+        const bigDelay = t.delayDep >= SEUIL_MINUTES || t.cancelled;
         if (bigDelay && !alreadyAlerted.has(t.uid)) {
           alreadyAlerted.add(t.uid);
           alerts.push({ ...t, dir });
@@ -78,12 +79,14 @@ async function sendEmail(apiKey, from, to, alerts) {
   const rows = alerts.map(a => {
     const sens = a.dir === "angers-paris" ? "Angers → Paris" : "Paris → Angers";
     const heure = fmtTime(a.baseTime);
-    const etat = a.cancelled ? "SUPPRIMÉ" : `+${a.delayMin} min`;
+    const etat = a.cancelled ? "SUPPRIMÉ" : `+${a.delayDep} min`;
+    const cause = a.cause ? escapeHtmlMail(a.cause) : "—";
     return `<tr>
       <td style="padding:8px 12px;border-bottom:1px solid #eee;">${sens}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #eee;">${heure}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #eee;">Train ${a.trainNo}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#c0392b;font-weight:bold;">${etat}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#666;">${cause}</td>
     </tr>`;
   }).join("");
 
@@ -98,6 +101,7 @@ async function sendEmail(apiKey, from, to, alerts) {
             <th style="padding:8px 12px;">Départ prévu</th>
             <th style="padding:8px 12px;">Train</th>
             <th style="padding:8px 12px;">État</th>
+            <th style="padding:8px 12px;">Cause</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -108,7 +112,7 @@ async function sendEmail(apiKey, from, to, alerts) {
     </div>`;
 
   const subject = alerts.length === 1
-    ? `🚄 Retard train ${alerts[0].trainNo} (${alerts[0].cancelled ? "supprimé" : "+" + alerts[0].delayMin + " min"})`
+    ? `🚄 Retard train ${alerts[0].trainNo} (${alerts[0].cancelled ? "supprimé" : "+" + alerts[0].delayDep + " min"})`
     : `🚄 ${alerts.length} trains en retard sur ta ligne`;
 
   const resp = await fetch("https://api.resend.com/emails", {
@@ -129,4 +133,8 @@ async function sendEmail(apiKey, from, to, alerts) {
 function fmtTime(s) {
   if (!s) return "—";
   return `${s.slice(9,11)}h${s.slice(11,13)}`;
+}
+
+function escapeHtmlMail(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }

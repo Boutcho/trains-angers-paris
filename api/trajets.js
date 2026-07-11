@@ -57,7 +57,7 @@ module.exports = async function handler(req, res) {
       } else if (action === "corriger") {
         trajets = await corrigerRetard(mois, body.id, body.delayManuel);
       } else if (action === "rafraichir") {
-        trajets = await rafraichirRetardSncf(mois, body.id, body.delaySncf, body.etat);
+        trajets = await rafraichirRetardSncf(mois, body.id, body.delaySncf, body.etat, body.cause);
       } else if (action === "supprimer") {
         trajets = await supprimerTrajet(mois, body.id);
       } else {
