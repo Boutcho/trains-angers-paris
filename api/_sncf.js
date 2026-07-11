@@ -66,6 +66,7 @@ async function getTrains(dir, key, opts = {}) {
   const data = await res.json();
   const journeys = data.journeys || [];
   const trains = [];
+  const maintenant = new Date();
 
   for (const j of journeys) {
     // Dans un trajet, on cherche la section "train" (public_transport).
@@ -73,29 +74,88 @@ async function getTrains(dir, key, opts = {}) {
     if (!section) continue;
 
     const info = section.display_informations || {};
-    const base = section.base_departure_date_time || j.departure_date_time;
-    const real = section.departure_date_time || j.departure_date_time;
 
-    let delayMin = 0;
-    const b = parseSncfDate(base), r = parseSncfDate(real);
-    if (b && r) delayMin = Math.round((r - b) / 60000);
+    // --- HEURES DE DÉPART (prévue = base, réelle = amended/real) ---
+    const baseDep = section.base_departure_date_time || j.departure_date_time;
+    const realDep = section.departure_date_time || j.departure_date_time;
+
+    // --- HEURES D'ARRIVÉE (prévue + réelle) ---
+    // Selon les versions de l'API, le champ peut s'appeler différemment ;
+    // on cherche donc à plusieurs endroits, du plus précis au plus général.
+    const baseArr = section.base_arrival_date_time
+                 || info.base_arrival_date_time
+                 || j.arrival_date_time;
+    const realArr = section.arrival_date_time
+                 || info.arrival_date_time
+                 || j.arrival_date_time;
+
+    // --- Retards en minutes ---
+    const delayDep = diffMinutes(baseDep, realDep);
+    const delayArr = diffMinutes(baseArr, realArr);
+
+    // --- État du train : pas parti / en route / arrivé ---
+    // On privilégie l'info SNCF si elle existe, sinon on se base sur l'heure.
+    const arrEffective = parseSncfDate(realArr);
+    const depEffective = parseSncfDate(realDep);
+    const sectionState = (section.data_freshness || "").toLowerCase();
+
+    let etat;
+    if (arrEffective && arrEffective <= maintenant) {
+      etat = "arrive";          // l'arrivée réelle est passée -> terminé
+    } else if (depEffective && depEffective <= maintenant) {
+      etat = "en_route";        // parti mais pas encore arrivé
+    } else {
+      etat = "a_venir";         // pas encore parti
+    }
+
+    // --- Retard "pertinent" selon l'état (la colonne intelligente) ---
+    //   à venir  -> retard au départ (anticipation)
+    //   en route -> retard d'arrivée recalculé en direct
+    //   arrivé   -> retard d'arrivée définitif
+    let delayPertinent, natureRetard;
+    if (etat === "a_venir") {
+      delayPertinent = delayDep;
+      natureRetard = "depart";
+    } else if (etat === "en_route") {
+      delayPertinent = (delayArr !== null) ? delayArr : delayDep;
+      natureRetard = "en_route";
+    } else {
+      delayPertinent = (delayArr !== null) ? delayArr : delayDep;
+      natureRetard = "arrivee";
+    }
 
     const status = (info.status || j.status || "").toLowerCase();
     const cancelled = status.includes("delet") || status.includes("no_service");
 
     trains.push({
       trainNo: info.headsign || info.trip_short_name || "—",
-      baseTime: base,
-      realTime: real,
-      delayMin: delayMin > 0 ? delayMin : 0,
+      // départ
+      baseTime: baseDep,
+      realTime: realDep,
+      delayDep: Math.max(0, delayDep || 0),
+      // arrivée
+      baseArrTime: baseArr,
+      realArrTime: realArr,
+      delayArr: (delayArr === null) ? null : Math.max(0, delayArr),
+      // synthèse "colonne intelligente"
+      etat,                       // a_venir | en_route | arrive
+      natureRetard,               // depart | en_route | arrivee
+      delayPertinent: Math.max(0, delayPertinent || 0),
+      // le retard qui compte pour la G30 = retard à l'arrivée (ou départ en repli)
+      delayG30: (delayArr === null) ? Math.max(0, delayDep || 0) : Math.max(0, delayArr),
       cancelled,
-      // Identifiant stable d'un train pour un jour donné, pour ne
-      // pas envoyer deux fois la même alerte.
-      uid: `${dir}:${info.headsign || info.trip_short_name || "x"}:${(base || "").slice(0,8)}`,
+      uid: `${dir}:${info.headsign || info.trip_short_name || "x"}:${(baseDep || "").slice(0,8)}`,
     });
   }
 
   return trains;
+}
+
+// Différence en minutes entre deux dates SNCF. null si l'une manque.
+function diffMinutes(base, real) {
+  const b = parseSncfDate(base), r = parseSncfDate(real);
+  if (!b || !r) return null;
+  return Math.round((r - b) / 60000);
 }
 
 module.exports = { getTrains, parseSncfDate, GARES };

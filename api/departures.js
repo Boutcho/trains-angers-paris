@@ -21,7 +21,7 @@ module.exports = async function handler(req, res) {
 
   try {
     const trains = await getTrains(dir, KEY, { count, sinceMidnight });
-    const lateCount = trains.filter(t => t.delayMin > 0 || t.cancelled).length;
+    const lateCount = trains.filter(t => t.delayPertinent > 0 || t.cancelled).length;
     res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=30");
     res.status(200).json({ trains, lateCount });
   } catch (e) {

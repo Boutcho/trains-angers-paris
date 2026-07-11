@@ -84,6 +84,21 @@ async function supprimerTrajet(mois, id) {
   return filtree;
 }
 
+// Met à jour le retard SNCF d'arrivée d'un trajet déjà enregistré
+// (utile quand on a réservé un train pas encore arrivé : sa valeur
+// d'arrivée définitive n'était pas encore connue). Ne touche PAS
+// au retard manuel s'il a été saisi.
+async function rafraichirRetardSncf(mois, id, delaySncf, etat) {
+  const liste = await lireMois(mois);
+  const t = liste.find(x => x.id === id);
+  if (t) {
+    t.delaySncf = Number(delaySncf) || 0;
+    if (etat) t.etat = etat;
+    await ecrireMois(mois, liste);
+  }
+  return liste;
+}
+
 // Corrige le retard manuel d'un trajet.
 async function corrigerRetard(mois, id, delayManuel) {
   const liste = await lireMois(mois);
@@ -105,5 +120,5 @@ function retardRetenu(trajet) {
 
 module.exports = {
   lireMois, ajouterTrajet, supprimerTrajet, corrigerRetard,
-  retardRetenu, upstashConfigure,
+  rafraichirRetardSncf, retardRetenu, upstashConfigure,
 };

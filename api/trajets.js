@@ -11,7 +11,7 @@
 //    POST /api/trajets  {action:"supprimer", mois, id}
 // ============================================================
 
-const { lireMois, ajouterTrajet, supprimerTrajet, corrigerRetard, retardRetenu, upstashConfigure } = require("./_storage");
+const { lireMois, ajouterTrajet, supprimerTrajet, corrigerRetard, rafraichirRetardSncf, retardRetenu, upstashConfigure } = require("./_storage");
 const { calculer } = require("./_points");
 
 // Recalcule points + cumul à partir des trajets stockés,
@@ -56,6 +56,8 @@ module.exports = async function handler(req, res) {
         trajets = await ajouterTrajet(mois, t);
       } else if (action === "corriger") {
         trajets = await corrigerRetard(mois, body.id, body.delayManuel);
+      } else if (action === "rafraichir") {
+        trajets = await rafraichirRetardSncf(mois, body.id, body.delaySncf, body.etat);
       } else if (action === "supprimer") {
         trajets = await supprimerTrajet(mois, body.id);
       } else {
