@@ -17,8 +17,13 @@
 //   Le retard "retenu" = delayManuel si défini, sinon delaySncf.
 // ============================================================
 
-const URL = process.env.UPSTASH_REDIS_REST_URL;
-const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+// L'URL et le jeton peuvent être fournis sous plusieurs noms selon la façon
+// dont la base a été connectée à Vercel :
+//   - Upstash direct : UPSTASH_REDIS_REST_URL / _TOKEN
+//   - via l'intégration KV de Vercel : KV_REST_API_URL / KV_REST_API_TOKEN
+// On accepte les deux pour que ça marche sans rien reconfigurer.
+const URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
 
 // Repli local (si Upstash pas encore configuré) : mémoire de session.
 // Permet de tester l'app avant de brancher la base. NON durable.
