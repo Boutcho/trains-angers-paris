@@ -1,140 +1,76 @@
 // ============================================================
-//  VÉRIFICATEUR D'ALERTES (réveillé par cron-job.org)
+//  API DU CARNET MENSUEL
 // ------------------------------------------------------------
-//  Toutes les ~10 min, un service externe appelle cette adresse.
-//  Elle :
-//   1. demande les trajets Angers⇄Paris à la SNCF
-//   2. repère les trains en retard de plus de 15 min (ou supprimés)
-//   3. envoie un email aux destinataires configurés
-//   4. retient ce qui a déjà été signalé pour ne pas spammer
+//  Gère les trajets que tu as marqués "réservé", leur correction
+//  de retard, et renvoie le calcul de Points Prime à jour.
 //
-//  MÉMOIRE "déjà signalé" : sur le plan gratuit, on n'a pas de
-//  base de données. On utilise donc une astuce simple et gratuite :
-//  Vercel Edge Config OU, plus simple encore, une mémoire courte en
-//  RAM. Ici on choisit la version la plus simple à déployer : une
-//  mémoire en RAM qui vit tant que la fonction reste "chaude".
-//  Conséquence honnête : après une longue inactivité, un même gros
-//  retard PEUT être re-signalé une fois. Acceptable pour ton usage.
-//  (Je t'explique dans le guide comment passer à une mémoire durable
-//   si un jour tu veux zéro doublon garanti.)
+//  Une seule adresse, plusieurs actions via le paramètre "action" :
+//    GET  /api/trajets?mois=2026-07              -> liste + calcul
+//    POST /api/trajets  {action:"ajouter", mois, trajet}
+//    POST /api/trajets  {action:"corriger", mois, id, delayManuel}
+//    POST /api/trajets  {action:"supprimer", mois, id}
 // ============================================================
 
-const { getTrains } = require("./_sncf");
+const { lireMois, ajouterTrajet, supprimerTrajet, corrigerRetard, rafraichirRetardSncf, retardRetenu, upstashConfigure } = require("./_storage");
+const { calculer } = require("./_points");
 
-// Mémoire courte : uid de train -> déjà alerté ?
-const alreadyAlerted = new Set();
-
-const SEUIL_MINUTES = 15;
+// Recalcule points + cumul à partir des trajets stockés,
+// en utilisant le retard "retenu" (manuel prioritaire).
+function synthese(trajets) {
+  const pourCalcul = trajets.map(t => ({ delayMin: retardRetenu(t) }));
+  const res = calculer(pourCalcul);
+  return {
+    trajets: trajets.map(t => ({ ...t, delayRetenu: retardRetenu(t) })),
+    ...res,
+    stockageDurable: upstashConfigure(),
+  };
+}
 
 module.exports = async function handler(req, res) {
-  // Sécurité : seul cron-job.org, qui connaît le secret, peut déclencher.
-  const secret = process.env.CRON_SECRET;
-  const auth = req.headers["authorization"] || "";
-  if (secret && auth !== `Bearer ${secret}`) {
-    res.status(401).json({ error: "Non autorisé." });
-    return;
-  }
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") { res.status(200).end(); return; }
 
-  const KEY = process.env.SNCF_API_KEY;
-  const RESEND_KEY = process.env.RESEND_API_KEY;
-  const FROM = process.env.ALERT_FROM || "onboarding@resend.dev";
-  const TO = (process.env.ALERT_TO || "").split(",").map(s => s.trim()).filter(Boolean);
-
-  if (!KEY || !RESEND_KEY || !TO.length) {
-    res.status(500).json({ error: "Configuration incomplète (clé SNCF, clé Resend ou destinataires)." });
-    return;
-  }
-
-  const alerts = [];
+  const moisDefaut = new Date().toISOString().slice(0, 7); // "2026-07"
 
   try {
-    for (const dir of ["angers-paris", "paris-angers"]) {
-      const trains = await getTrains(dir, KEY);
-      for (const t of trains) {
-        // Alertes basées sur le retard AU DÉPART (anticipation avant le départ).
-        const bigDelay = t.delayDep >= SEUIL_MINUTES || t.cancelled;
-        if (bigDelay && !alreadyAlerted.has(t.uid)) {
-          alreadyAlerted.add(t.uid);
-          alerts.push({ ...t, dir });
-        }
-      }
-    }
-
-    // Rien de neuf : on s'arrête là.
-    if (!alerts.length) {
-      res.status(200).json({ ok: true, sent: 0, message: "Aucun nouveau retard important." });
+    if (req.method === "GET") {
+      const mois = req.query.mois || moisDefaut;
+      const trajets = await lireMois(mois);
+      res.status(200).json(synthese(trajets));
       return;
     }
 
-    // On envoie un email récapitulatif.
-    await sendEmail(RESEND_KEY, FROM, TO, alerts);
-    res.status(200).json({ ok: true, sent: alerts.length });
+    if (req.method === "POST") {
+      const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+      const mois = body.mois || moisDefaut;
+      const action = body.action;
+
+      let trajets;
+      if (action === "ajouter") {
+        // On génère un id stable si absent.
+        const t = body.trajet || {};
+        if (!t.id) t.id = `${t.dir}:${t.trainNo}:${(t.baseTime || "").slice(0,8)}:${Date.now()}`;
+        if (t.delayManuel === undefined) t.delayManuel = null;
+        trajets = await ajouterTrajet(mois, t);
+      } else if (action === "corriger") {
+        trajets = await corrigerRetard(mois, body.id, body.delayManuel);
+      } else if (action === "rafraichir") {
+        trajets = await rafraichirRetardSncf(mois, body.id, body.delaySncf, body.etat, body.cause);
+      } else if (action === "supprimer") {
+        trajets = await supprimerTrajet(mois, body.id);
+      } else {
+        res.status(400).json({ error: "Action inconnue." });
+        return;
+      }
+
+      res.status(200).json(synthese(trajets));
+      return;
+    }
+
+    res.status(405).json({ error: "Méthode non autorisée." });
   } catch (e) {
-    res.status(502).json({ error: e.message || "Erreur pendant la vérification." });
+    res.status(500).json({ error: e.message || "Erreur serveur." });
   }
 };
-
-// --- Construction et envoi de l'email via Resend ---
-async function sendEmail(apiKey, from, to, alerts) {
-  const rows = alerts.map(a => {
-    const sens = a.dir === "angers-paris" ? "Angers → Paris" : "Paris → Angers";
-    const heure = fmtTime(a.baseTime);
-    const etat = a.cancelled ? "SUPPRIMÉ" : `+${a.delayDep} min`;
-    const cause = a.cause ? escapeHtmlMail(a.cause) : "—";
-    return `<tr>
-      <td style="padding:8px 12px;border-bottom:1px solid #eee;">${sens}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #eee;">${heure}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #eee;">Train ${a.trainNo}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#c0392b;font-weight:bold;">${etat}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#666;">${cause}</td>
-    </tr>`;
-  }).join("");
-
-  const html = `
-    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
-      <h2 style="color:#c0392b;">🚄 Retard détecté sur ta ligne</h2>
-      <p>Un ou plusieurs trains Angers ⇄ Paris ont plus de ${SEUIL_MINUTES} minutes de retard :</p>
-      <table style="width:100%;border-collapse:collapse;font-size:14px;">
-        <thead>
-          <tr style="background:#f7f7f7;text-align:left;">
-            <th style="padding:8px 12px;">Sens</th>
-            <th style="padding:8px 12px;">Départ prévu</th>
-            <th style="padding:8px 12px;">Train</th>
-            <th style="padding:8px 12px;">État</th>
-            <th style="padding:8px 12px;">Cause</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-      <p style="color:#888;font-size:12px;margin-top:20px;">
-        Alerte automatique · Données SNCF · Seuil : ${SEUIL_MINUTES} min
-      </p>
-    </div>`;
-
-  const subject = alerts.length === 1
-    ? `🚄 Retard train ${alerts[0].trainNo} (${alerts[0].cancelled ? "supprimé" : "+" + alerts[0].delayDep + " min"})`
-    : `🚄 ${alerts.length} trains en retard sur ta ligne`;
-
-  const resp = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ from, to, subject, html }),
-  });
-
-  if (!resp.ok) {
-    const detail = await resp.text().catch(() => "");
-    throw new Error(`Resend a répondu ${resp.status}. ${detail}`);
-  }
-}
-
-function fmtTime(s) {
-  if (!s) return "—";
-  return `${s.slice(9,11)}h${s.slice(11,13)}`;
-}
-
-function escapeHtmlMail(s) {
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}

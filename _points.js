@@ -1,76 +1,75 @@
 // ============================================================
-//  API DU CARNET MENSUEL
+//  CALCUL DES POINTS PRIME — Mécanisme G30 Proactive
 // ------------------------------------------------------------
-//  Gère les trajets que tu as marqués "réservé", leur correction
-//  de retard, et renvoie le calcul de Points Prime à jour.
+//  Règles officielles (tgvinoui.sncf, barème G30 Proactive) :
 //
-//  Une seule adresse, plusieurs actions via le paramètre "action" :
-//    GET  /api/trajets?mois=2026-07              -> liste + calcul
-//    POST /api/trajets  {action:"ajouter", mois, trajet}
-//    POST /api/trajets  {action:"corriger", mois, id, delayManuel}
-//    POST /api/trajets  {action:"supprimer", mois, id}
+//  1) SEUIL PAR TRAJET : seul un retard STRICTEMENT supérieur à
+//     15 minutes est comptabilisé dans le compteur mensuel.
+//     Un train à 15 min ou moins compte pour 0.
+//     Un train à 18 min compte pour 18 min.
+//
+//  2) BARÈME SUR LE CUMUL DU MOIS (en minutes) :
+//        30–59 min   ->    800 pts
+//        60–119 min  ->  2 000 pts
+//        120–179 min ->  3 000 pts
+//        180–239 min ->  4 000 pts
+//        240–299 min ->  8 000 pts
+//        300 min +   -> 12 500 pts
+//     En dessous de 30 min cumulées : 0 pt.
 // ============================================================
 
-const { lireMois, ajouterTrajet, supprimerTrajet, corrigerRetard, rafraichirRetardSncf, retardRetenu, upstashConfigure } = require("./_storage");
-const { calculer } = require("./_points");
+const SEUIL_TRAJET_MIN = 15;   // au-delà, le retard compte
+const SEUIL_POINTS_MIN = 30;   // cumul minimum pour toucher des points
 
-// Recalcule points + cumul à partir des trajets stockés,
-// en utilisant le retard "retenu" (manuel prioritaire).
-function synthese(trajets) {
-  const pourCalcul = trajets.map(t => ({ delayMin: retardRetenu(t) }));
-  const res = calculer(pourCalcul);
+// Barème : chaque palier = { min: minutes cumulées mini, points }
+// Trié du plus élevé au plus bas pour trouver le palier atteint.
+const BAREME = [
+  { min: 300, points: 12500, label: "5h et plus" },
+  { min: 240, points: 8000,  label: "4h – 4h59" },
+  { min: 180, points: 4000,  label: "3h – 3h59" },
+  { min: 120, points: 3000,  label: "2h – 2h59" },
+  { min: 60,  points: 2000,  label: "1h – 1h59" },
+  { min: 30,  points: 800,   label: "30 – 59 min" },
+];
+
+// Un trajet compte-t-il ? (retard > 15 min et non annulé traité à part)
+function minutesComptabilisees(delayMin) {
+  const d = Number(delayMin) || 0;
+  return d > SEUIL_TRAJET_MIN ? d : 0;
+}
+
+// À partir d'une liste de trajets {delayMin}, calcule le cumul retenu.
+function cumulMinutes(trajets) {
+  return trajets.reduce((total, t) => total + minutesComptabilisees(t.delayMin), 0);
+}
+
+// À partir d'un cumul de minutes, renvoie les points + le palier.
+function pointsPourCumul(cumul) {
+  if (cumul < SEUIL_POINTS_MIN) {
+    return { points: 0, palier: "Moins de 30 min cumulées", prochainPalier: 30 };
+  }
+  const palier = BAREME.find(p => cumul >= p.min);
+  // Minutes restantes avant le palier supérieur (pour l'affichage "il te manque X min").
+  const idx = BAREME.indexOf(palier);
+  const prochainPalier = idx > 0 ? BAREME[idx - 1].min : null;
   return {
-    trajets: trajets.map(t => ({ ...t, delayRetenu: retardRetenu(t) })),
-    ...res,
-    stockageDurable: upstashConfigure(),
+    points: palier.points,
+    palier: palier.label,
+    prochainPalier, // null si déjà au max
   };
 }
 
-module.exports = async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") { res.status(200).end(); return; }
+// Fonction tout-en-un : de la liste de trajets aux points.
+function calculer(trajets) {
+  const cumul = cumulMinutes(trajets || []);
+  const res = pointsPourCumul(cumul);
+  return {
+    cumulMinutes: cumul,
+    points: res.points,
+    palier: res.palier,
+    prochainPalier: res.prochainPalier,
+    minutesAvantProchain: res.prochainPalier ? Math.max(0, res.prochainPalier - cumul) : null,
+  };
+}
 
-  const moisDefaut = new Date().toISOString().slice(0, 7); // "2026-07"
-
-  try {
-    if (req.method === "GET") {
-      const mois = req.query.mois || moisDefaut;
-      const trajets = await lireMois(mois);
-      res.status(200).json(synthese(trajets));
-      return;
-    }
-
-    if (req.method === "POST") {
-      const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-      const mois = body.mois || moisDefaut;
-      const action = body.action;
-
-      let trajets;
-      if (action === "ajouter") {
-        // On génère un id stable si absent.
-        const t = body.trajet || {};
-        if (!t.id) t.id = `${t.dir}:${t.trainNo}:${(t.baseTime || "").slice(0,8)}:${Date.now()}`;
-        if (t.delayManuel === undefined) t.delayManuel = null;
-        trajets = await ajouterTrajet(mois, t);
-      } else if (action === "corriger") {
-        trajets = await corrigerRetard(mois, body.id, body.delayManuel);
-      } else if (action === "rafraichir") {
-        trajets = await rafraichirRetardSncf(mois, body.id, body.delaySncf, body.etat, body.cause);
-      } else if (action === "supprimer") {
-        trajets = await supprimerTrajet(mois, body.id);
-      } else {
-        res.status(400).json({ error: "Action inconnue." });
-        return;
-      }
-
-      res.status(200).json(synthese(trajets));
-      return;
-    }
-
-    res.status(405).json({ error: "Méthode non autorisée." });
-  } catch (e) {
-    res.status(500).json({ error: e.message || "Erreur serveur." });
-  }
-};
+module.exports = { calculer, cumulMinutes, pointsPourCumul, minutesComptabilisees, BAREME, SEUIL_TRAJET_MIN };

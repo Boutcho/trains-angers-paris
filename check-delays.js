@@ -1,125 +1,168 @@
 // ============================================================
-//  STOCKAGE DES TRAJETS RÉSERVÉS (carnet mensuel)
+//  VÉRIFICATEUR D'ALERTES (réveillé par cron-job.org)
 // ------------------------------------------------------------
-//  On utilise Upstash Redis via son API "REST" : pas de librairie
-//  à installer, juste des appels web avec une URL + un jeton, tous
-//  deux rangés dans le coffre-fort Vercel :
-//     UPSTASH_REDIS_REST_URL
-//     UPSTASH_REDIS_REST_TOKEN
+//  Toutes les ~10 min, un service externe appelle cette adresse.
+//  Elle :
+//   1. demande les trajets Angers⇄Paris à la SNCF
+//   2. repère les trains en retard de plus de 15 min (ou supprimés)
+//   3. envoie un email aux destinataires configurés
+//   4. retient ce qui a déjà été signalé pour ne pas spammer
 //
-//  Un trajet réservé est stocké sous une clé par mois :
-//     trajets:2026-07  ->  liste JSON de trajets
-//
-//  Chaque trajet =
-//     { id, dir, trainNo, baseTime, delaySncf, delayManuel, cancelled }
-//   - delaySncf  : retard vu par la SNCF au moment de l'enregistrement
-//   - delayManuel: retard corrigé à la main (null si non corrigé)
-//   Le retard "retenu" = delayManuel si défini, sinon delaySncf.
+//  MÉMOIRE "déjà signalé" : sur le plan gratuit, on n'a pas de
+//  base de données. On utilise donc une astuce simple et gratuite :
+//  Vercel Edge Config OU, plus simple encore, une mémoire courte en
+//  RAM. Ici on choisit la version la plus simple à déployer : une
+//  mémoire en RAM qui vit tant que la fonction reste "chaude".
+//  Conséquence honnête : après une longue inactivité, un même gros
+//  retard PEUT être re-signalé une fois. Acceptable pour ton usage.
+//  (Je t'explique dans le guide comment passer à une mémoire durable
+//   si un jour tu veux zéro doublon garanti.)
 // ============================================================
 
-const URL = process.env.UPSTASH_REDIS_REST_URL;
-const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const { getTrains } = require("./_sncf");
 
-// Repli local (si Upstash pas encore configuré) : mémoire de session.
-// Permet de tester l'app avant de brancher la base. NON durable.
-const memoireLocale = {};
+// Mémoire courte : uid de train -> déjà alerté ?
+const alreadyAlerted = new Set();
 
-function upstashConfigure() {
-  return Boolean(URL && TOKEN);
-}
+const SEUIL_MINUTES = 15;
 
-// Appel bas niveau à Upstash (commande Redis via REST).
-async function redis(command) {
-  const res = await fetch(URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(command),
-  });
-  if (!res.ok) throw new Error(`Upstash ${res.status}`);
-  const data = await res.json();
-  return data.result;
-}
-
-function cleMois(mois) {
-  return `trajets:${mois}`; // mois au format "2026-07"
-}
-
-// Lit la liste des trajets d'un mois.
-async function lireMois(mois) {
-  if (!upstashConfigure()) {
-    return memoireLocale[mois] || [];
-  }
-  const raw = await redis(["GET", cleMois(mois)]);
-  if (!raw) return [];
-  try { return JSON.parse(raw); } catch { return []; }
-}
-
-// Écrit la liste complète des trajets d'un mois.
-async function ecrireMois(mois, trajets) {
-  if (!upstashConfigure()) {
-    memoireLocale[mois] = trajets;
+module.exports = async function handler(req, res) {
+  // Sécurité : seul cron-job.org, qui connaît le secret, peut déclencher.
+  const secret = process.env.CRON_SECRET;
+  const auth = req.headers["authorization"] || "";
+  if (secret && auth !== `Bearer ${secret}`) {
+    res.status(401).json({ error: "Non autorisé." });
     return;
   }
-  await redis(["SET", cleMois(mois), JSON.stringify(trajets)]);
-}
 
-// Ajoute un trajet (ou le remplace s'il a le même id).
-async function ajouterTrajet(mois, trajet) {
-  const liste = await lireMois(mois);
-  const i = liste.findIndex(t => t.id === trajet.id);
-  if (i >= 0) liste[i] = trajet;
-  else liste.push(trajet);
-  await ecrireMois(mois, liste);
-  return liste;
-}
+  const KEY = process.env.SNCF_API_KEY;
+  const RESEND_KEY = process.env.RESEND_API_KEY;
+  const FROM = process.env.ALERT_FROM || "onboarding@resend.dev";
+  const TO = (process.env.ALERT_TO || "").split(",").map(s => s.trim()).filter(Boolean);
 
-// Supprime un trajet par id.
-async function supprimerTrajet(mois, id) {
-  const liste = await lireMois(mois);
-  const filtree = liste.filter(t => t.id !== id);
-  await ecrireMois(mois, filtree);
-  return filtree;
-}
-
-// Met à jour le retard SNCF d'arrivée d'un trajet déjà enregistré
-// (utile quand on a réservé un train pas encore arrivé : sa valeur
-// d'arrivée définitive n'était pas encore connue). Ne touche PAS
-// au retard manuel s'il a été saisi.
-async function rafraichirRetardSncf(mois, id, delaySncf, etat, cause) {
-  const liste = await lireMois(mois);
-  const t = liste.find(x => x.id === id);
-  if (t) {
-    t.delaySncf = Number(delaySncf) || 0;
-    if (etat) t.etat = etat;
-    if (cause !== undefined && cause !== null && cause !== "") t.cause = cause;
-    await ecrireMois(mois, liste);
+  if (!KEY || !RESEND_KEY || !TO.length) {
+    res.status(500).json({ error: "Configuration incomplète (clé SNCF, clé Resend ou destinataires)." });
+    return;
   }
-  return liste;
-}
 
-// Corrige le retard manuel d'un trajet.
-async function corrigerRetard(mois, id, delayManuel) {
-  const liste = await lireMois(mois);
-  const t = liste.find(x => x.id === id);
-  if (t) {
-    t.delayManuel = (delayManuel === null || delayManuel === "") ? null : Number(delayManuel);
-    await ecrireMois(mois, liste);
+  const alerts = [];
+
+  try {
+    for (const dir of ["angers-paris", "paris-angers"]) {
+      const trains = await getTrains(dir, KEY);
+      for (const t of trains) {
+        // Alertes basées sur le retard AU DÉPART (anticipation avant le départ).
+        const bigDelay = t.delayDep >= SEUIL_MINUTES || t.cancelled;
+        if (bigDelay && !alreadyAlerted.has(t.uid)) {
+          alreadyAlerted.add(t.uid);
+          alerts.push({ ...t, dir });
+        }
+      }
+    }
+
+    // Rien de neuf : on s'arrête là.
+    if (!alerts.length) {
+      res.status(200).json({ ok: true, sent: 0, message: "Aucun nouveau retard important." });
+      return;
+    }
+
+    // On envoie un email récapitulatif.
+    await sendEmail(RESEND_KEY, FROM, TO, alerts);
+    res.status(200).json({ ok: true, sent: alerts.length });
+  } catch (e) {
+    res.status(502).json({ error: e.message || "Erreur pendant la vérification." });
   }
-  return liste;
-}
-
-// Retard "retenu" pour un trajet (manuel prioritaire sur SNCF).
-function retardRetenu(trajet) {
-  if (trajet.delayManuel !== null && trajet.delayManuel !== undefined) {
-    return Number(trajet.delayManuel) || 0;
-  }
-  return Number(trajet.delaySncf) || 0;
-}
-
-module.exports = {
-  lireMois, ajouterTrajet, supprimerTrajet, corrigerRetard,
-  rafraichirRetardSncf, retardRetenu, upstashConfigure,
 };
+
+// --- Construction et envoi de l'email via Resend ---
+async function sendEmail(apiKey, from, to, alerts) {
+  const maintenant = new Date();
+  const rows = alerts.map(a => {
+    const sens = a.dir === "angers-paris" ? "Angers → Paris" : "Paris → Angers";
+    const heure = fmtTime(a.baseTime);
+    const etat = a.cancelled ? "SUPPRIMÉ" : `+${a.delayDep} min`;
+    const cause = a.cause ? escapeHtmlMail(a.cause) : "—";
+    const resa = calculReservable(a.baseTime, maintenant);
+    return `<tr>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;">${sens}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;">${heure}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;">Train ${a.trainNo}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#c0392b;font-weight:bold;">${etat}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#666;">${cause}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;color:${resa.past?'#c0392b':'#2c7a3f'};font-size:13px;">${resa.texte}</td>
+    </tr>`;
+  }).join("");
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+      <h2 style="color:#c0392b;">🚄 Retard détecté sur ta ligne</h2>
+      <p>Un ou plusieurs trains Angers ⇄ Paris ont plus de ${SEUIL_MINUTES} minutes de retard :</p>
+      <table style="width:100%;border-collapse:collapse;font-size:14px;">
+        <thead>
+          <tr style="background:#f7f7f7;text-align:left;">
+            <th style="padding:8px 12px;">Sens</th>
+            <th style="padding:8px 12px;">Départ prévu</th>
+            <th style="padding:8px 12px;">Train</th>
+            <th style="padding:8px 12px;">État</th>
+            <th style="padding:8px 12px;">Cause</th>
+            <th style="padding:8px 12px;">Réservable</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p style="color:#888;font-size:12px;margin-top:20px;">
+        Alerte automatique · Données SNCF · Seuil : ${SEUIL_MINUTES} min
+      </p>
+    </div>`;
+
+  const subject = alerts.length === 1
+    ? `🚄 Retard train ${alerts[0].trainNo} (${alerts[0].cancelled ? "supprimé" : "+" + alerts[0].delayDep + " min"})`
+    : `🚄 ${alerts.length} trains en retard sur ta ligne`;
+
+  const resp = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ from, to, subject, html }),
+  });
+
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => "");
+    throw new Error(`Resend a répondu ${resp.status}. ${detail}`);
+  }
+}
+
+function fmtTime(s) {
+  if (!s) return "—";
+  return `${s.slice(9,11)}h${s.slice(11,13)}`;
+}
+
+function escapeHtmlMail(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// Calcule le temps restant avant l'heure de départ PRÉVUE, au moment de
+// l'envoi du mail. Sert à savoir combien de temps il reste pour réserver.
+// Une fois l'heure de départ prévue passée, la réservation n'est plus possible.
+function calculReservable(baseDepart, maintenant) {
+  if (!baseDepart) return { texte: "—", past: false };
+  const dep = new Date(
+    `${baseDepart.slice(0,4)}-${baseDepart.slice(4,6)}-${baseDepart.slice(6,8)}` +
+    `T${baseDepart.slice(9,11)}:${baseDepart.slice(11,13)}:${baseDepart.slice(13,15)}`
+  );
+  const diffMin = Math.round((dep - maintenant) / 60000);
+  if (diffMin <= 0) {
+    return { texte: "trop tard pour réserver", past: true };
+  }
+  return { texte: `${fmtDuree(diffMin)} pour réserver`, past: false };
+}
+
+// Formate une durée en minutes vers "0h17" ou "23 min".
+function fmtDuree(min) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  if (h > 0) return `${h}h${String(m).padStart(2,"0")}`;
+  return `${m} min`;
+}
