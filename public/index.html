@@ -46,9 +46,9 @@
   .row { display:grid; grid-template-columns:84px 60px 60px minmax(120px,1.4fr) 70px 76px 84px minmax(90px,1fr) 40px; gap:14px; padding:0 18px; height:58px; min-height:58px; max-height:58px; border-top:1px solid var(--line); align-items:center; overflow:hidden; }
   .row > div { overflow:hidden; }
   .row.past { opacity:.62; }
-  .row .time { font-family:var(--mono); font-size:19px; font-weight:700; position:relative; line-height:1.1; }
-  .row .time .new { color:var(--amber); }
-  .row .time .old { color:var(--ink-dim); text-decoration:line-through; font-size:11px; position:absolute; top:100%; left:0; margin-top:1px; }
+  .row .time { font-family:var(--mono); font-size:15px; font-weight:700; line-height:1.25; }
+  .row .time .new { color:var(--amber); display:block; }
+  .row .time .old { color:var(--ink-dim); text-decoration:line-through; font-size:11px; font-weight:400; display:block; }
   .row .dest { font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .row .train-no { color:var(--ink-dim); font-size:12px; font-family:var(--mono); }
 
@@ -255,28 +255,9 @@ async function loadAll() {
   }));
   lastRefresh = new Date();   // instant figé pour le compte à rebours "Réservable"
   renderLive();
-  syncReservedDelays();   // met à jour le retard d'arrivée des trajets réservés en cours
   stamp(); setDot(ok);
 }
 
-// Pour chaque train réservé encore visible et NON arrivé, on pousse au
-// carnet son retard d'arrivée à jour, pour que le compteur G30 se corrige
-// tout seul au fil de la journée. (On ne touche pas aux trains arrivés :
-// leur valeur est déjà définitive.)
-async function syncReservedDelays() {
-  const td = window._trainData || {};
-  for (const uid of savedIds) {
-    const t = td[uid];
-    if (!t || t.etat === "arrive") continue;
-    const mois = t.baseTime ? `${t.baseTime.slice(0,4)}-${t.baseTime.slice(4,6)}` : currentMonth;
-    try {
-      await fetch("/api/trajets", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ action:"rafraichir", mois, id:uid, delaySncf:t.delaySncf, etat:t.etat, cause:t.cause })
-      });
-    } catch(e) {}
-  }
-}
 
 function updateBadge(dir, count) {
   const b = document.getElementById(`badge-${dir}`);
