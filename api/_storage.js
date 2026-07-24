@@ -127,4 +127,5 @@ function retardRetenu(trajet) {
 module.exports = {
   lireMois, ajouterTrajet, supprimerTrajet, corrigerRetard,
   rafraichirRetardSncf, retardRetenu, upstashConfigure,
+  ecrireMoisPublic: ecrireMois,
 };
