@@ -82,14 +82,14 @@ async function sendEmail(apiKey, from, to, alerts) {
     const heure = fmtTime(a.baseTime);
     const etat = a.cancelled ? "SUPPRIMÉ" : `+${a.delayDep} min`;
     const cause = a.cause ? escapeHtmlMail(a.cause) : "—";
-    const preavis = calculPreavis(a.baseTime, maintenant);
+    const resa = calculReservable(a.baseTime, maintenant);
     return `<tr>
       <td style="padding:8px 12px;border-bottom:1px solid #eee;">${sens}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #eee;">${heure}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #eee;">Train ${a.trainNo}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#c0392b;font-weight:bold;">${etat}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#666;">${cause}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #eee;color:${preavis.past?'#c0392b':'#2c7a3f'};font-size:13px;">${preavis.texte}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;color:${resa.past?'#c0392b':'#2c7a3f'};font-size:13px;">${resa.texte}</td>
     </tr>`;
   }).join("");
 
@@ -105,7 +105,7 @@ async function sendEmail(apiKey, from, to, alerts) {
             <th style="padding:8px 12px;">Train</th>
             <th style="padding:8px 12px;">État</th>
             <th style="padding:8px 12px;">Cause</th>
-            <th style="padding:8px 12px;">Préavis</th>
+            <th style="padding:8px 12px;">Réservable</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -143,10 +143,10 @@ function escapeHtmlMail(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-// Calcule le temps entre maintenant et l'heure de départ PRÉVUE.
-// Renvoie un texte du type "annoncé 0h17 avant le départ", ou signale
-// que le départ prévu est déjà passé (donc trop tard pour réserver).
-function calculPreavis(baseDepart, maintenant) {
+// Calcule le temps restant avant l'heure de départ PRÉVUE, au moment de
+// l'envoi du mail. Sert à savoir combien de temps il reste pour réserver.
+// Une fois l'heure de départ prévue passée, la réservation n'est plus possible.
+function calculReservable(baseDepart, maintenant) {
   if (!baseDepart) return { texte: "—", past: false };
   const dep = new Date(
     `${baseDepart.slice(0,4)}-${baseDepart.slice(4,6)}-${baseDepart.slice(6,8)}` +
@@ -154,9 +154,9 @@ function calculPreavis(baseDepart, maintenant) {
   );
   const diffMin = Math.round((dep - maintenant) / 60000);
   if (diffMin <= 0) {
-    return { texte: `départ prévu dépassé (${fmtDuree(-diffMin)})`, past: true };
+    return { texte: "trop tard pour réserver", past: true };
   }
-  return { texte: `annoncé ${fmtDuree(diffMin)} avant le départ`, past: false };
+  return { texte: `${fmtDuree(diffMin)} pour réserver`, past: false };
 }
 
 // Formate une durée en minutes vers "0h17" ou "23 min".
