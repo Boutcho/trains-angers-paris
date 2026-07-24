@@ -1,0 +1,16 @@
+# Secrets et variables d'environnement — NE JAMAIS envoyer sur GitHub
+.env
+.env.*
+*.local
+
+# Dossiers d'outils
+node_modules/
+.vercel/
+
+# Reglages locaux de Claude Code (personnels, ne pas partager)
+.claude/settings.local.json
+
+# Fichiers systeme
+.DS_Store
+Thumbs.db
+desktop.ini
