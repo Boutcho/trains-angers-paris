@@ -68,7 +68,23 @@ module.exports = async function handler(req, res) {
 
     // On envoie un email récapitulatif.
     await sendEmail(RESEND_KEY, FROM, TO, alerts);
-    res.status(200).json({ ok: true, sent: alerts.length });
+
+    // On envoie aussi une notification push (ntfy), si elle est configurée.
+    // Absence de NTFY_TOPIC => on ne fait rien. Un échec push ne doit jamais
+    // faire échouer l'alerte email : on l'attrape sans relancer d'erreur.
+    let push = false;
+    const NTFY_TOPIC = process.env.NTFY_TOPIC;
+    const NTFY_SERVER = process.env.NTFY_SERVER || "https://ntfy.sh";
+    if (NTFY_TOPIC) {
+      try {
+        await sendPush(NTFY_SERVER, NTFY_TOPIC, alerts);
+        push = true;
+      } catch (e) {
+        console.error("Notification push (ntfy) échouée :", e.message);
+      }
+    }
+
+    res.status(200).json({ ok: true, sent: alerts.length, push });
   } catch (e) {
     res.status(502).json({ error: e.message || "Erreur pendant la vérification." });
   }
@@ -131,6 +147,52 @@ async function sendEmail(apiKey, from, to, alerts) {
   if (!resp.ok) {
     const detail = await resp.text().catch(() => "");
     throw new Error(`Resend a répondu ${resp.status}. ${detail}`);
+  }
+}
+
+// --- Construction et envoi de la notification push via ntfy ---
+// ntfy accepte une publication en JSON : on y met le titre et le message
+// (UTF-8, donc accents et emoji OK), une priorité haute, une pastille train
+// et un lien qui ouvre le tableau de bord quand on tape la notification.
+async function sendPush(server, topic, alerts) {
+  const maintenant = new Date();
+  let title, message;
+
+  if (alerts.length === 1) {
+    const a = alerts[0];
+    const sens = a.dir === "angers-paris" ? "Angers → Paris" : "Paris → Angers";
+    const etat = a.cancelled ? "SUPPRIMÉ" : `+${a.delayDep} min`;
+    const resa = calculReservable(a.baseTime, maintenant);
+    title = `🚄 Train ${a.trainNo} : ${etat}`;
+    message =
+      `${sens} · départ prévu ${fmtTime(a.baseTime)}\n` +
+      `${resa.texte}` +
+      (a.cause ? `\nCause : ${a.cause}` : "");
+  } else {
+    title = `🚄 ${alerts.length} trains en retard`;
+    message = alerts.map(a => {
+      const sens = a.dir === "angers-paris" ? "Angers→Paris" : "Paris→Angers";
+      const etat = a.cancelled ? "supprimé" : `+${a.delayDep} min`;
+      return `• ${sens} ${fmtTime(a.baseTime)} — Train ${a.trainNo} (${etat})`;
+    }).join("\n");
+  }
+
+  const resp = await fetch(server.replace(/\/+$/, ""), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      topic,
+      title,
+      message,
+      priority: 4,
+      tags: ["bullettrain_side"],
+      click: "https://trains-angers-paris.vercel.app/",
+    }),
+  });
+
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => "");
+    throw new Error(`ntfy a répondu ${resp.status}. ${detail}`);
   }
 }
 

@@ -113,6 +113,8 @@ vercel.json        Configuration Vercel
 | `RESEND_API_KEY` | Clé Resend pour l'envoi des emails |
 | `ALERT_TO` | Destinataires des alertes, séparés par des virgules |
 | `CRON_SECRET` | Secret protégeant `/api/check-delays` |
+| `NTFY_TOPIC` | Nom secret du canal ntfy pour les notifications push (optionnel : si absent, pas de push) |
+| `NTFY_SERVER` | Serveur ntfy (optionnel, défaut `https://ntfy.sh`) |
 | `KV_REST_API_URL` | URL Upstash (ajoutée automatiquement par Vercel) |
 | `KV_REST_API_TOKEN` | Token Upstash (ajouté automatiquement par Vercel) |
 
@@ -218,6 +220,12 @@ Colonnes : `Sens | Départ prévu | Train | État | Cause | Réservable`
 Déclenchement : retard **au départ** > 15 min, ou train supprimé.
 Anti-spam : un même train n'est signalé qu'une fois (mémoire en RAM — voir
 limites ci-dessous).
+
+### Notifications push (ntfy)
+En plus de l'email, `check-delays.js` envoie une notification push via **ntfy**
+si `NTFY_TOPIC` est défini (sinon, aucun effet). Même déclencheur et même liste
+d'alertes que l'email. Un échec d'envoi push n'interrompt jamais l'email. Le nom
+du canal est secret et vit uniquement dans les variables d'environnement Vercel.
 
 ---
 
