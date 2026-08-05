@@ -37,6 +37,10 @@ async function getTrains(dir, key, opts = {}) {
   const to   = dir === "paris-angers" ? GARES.angers : GARES.paris;
 
   const count = opts.count || 20;
+  // On sur-échantillonne : comme on ne gardera que les TGV INOUI, on demande
+  // plus de trajets à la SNCF pour ne pas se retrouver avec trop peu de trains
+  // après filtrage. On ramènera ensuite la liste à "count".
+  const apiCount = Math.min(count * 2 + 20, 100);
 
   // Point de départ dans le temps : soit maintenant (prochains trains),
   // soit minuit aujourd'hui (pour voir aussi les trains déjà partis).
@@ -52,7 +56,7 @@ async function getTrains(dir, key, opts = {}) {
   const url = `https://api.sncf.com/v1/coverage/sncf/journeys`
             + `?from=${from}&to=${to}`
             + `&datetime_represents=departure${datetimeParam}`
-            + `&count=${count}&data_freshness=realtime`;
+            + `&count=${apiCount}&data_freshness=realtime`;
 
   const res = await fetch(url, {
     headers: { "Authorization": "Basic " + Buffer.from(key + ":").toString("base64") },
@@ -80,6 +84,13 @@ async function getTrains(dir, key, opts = {}) {
     if (!section) continue;
 
     const info = section.display_informations || {};
+
+    // --- FILTRE : on ne surveille QUE les TGV INOUI ---
+    // Sur cette ligne, la SNCF nomme les autres trains "OUIGO", "Aléop" et
+    // "Rémi" (TER régionaux), "Intercités" ou "Transilien". Seul "TGV INOUI"
+    // contient "INOUI", ce qui en fait un critère de tri fiable et sans risque.
+    const commercial = (info.commercial_mode || "").toUpperCase();
+    if (!commercial.includes("INOUI")) continue;
 
     // --- HEURES DE DÉPART (prévue = base, réelle = amended/real) ---
     const baseDep = section.base_departure_date_time || j.departure_date_time;
@@ -162,7 +173,8 @@ async function getTrains(dir, key, opts = {}) {
     });
   }
 
-  return trains;
+  // On ramène la liste au nombre demandé (après le sur-échantillonnage).
+  return trains.slice(0, count);
 }
 
 // Différence en minutes entre deux dates SNCF. null si l'une manque.

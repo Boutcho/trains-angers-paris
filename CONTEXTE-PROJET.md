@@ -131,6 +131,15 @@ Calculé dans `_sncf.js` :
 - `en_route` — parti, pas encore arrivé
 - `arrive` — arrivé (heure d'arrivée réelle passée)
 
+### Filtre TGV INOUI (dans `_sncf.js`)
+`getTrains` ne renvoie **que les TGV INOUI** : on écarte OUIGO, les TER (nommés
+régionalement **Aléop** en Pays de la Loire, **Rémi** en Centre-Val de Loire),
+Intercités et Transilien. Critère : `commercial_mode` contient « INOUI » (seul
+le TGV INOUI le contient). Comme ce filtre retire des trains, `getTrains`
+sur-échantillonne (`apiCount`) puis ramène la liste à `count`. Ce filtre
+s'applique partout (tableau de bord, alertes, resynchronisation G30), ce qui est
+cohérent : la prime G30 ne concerne que les TGV INOUI.
+
 ### Les différents retards (tous en minutes, dans `_sncf.js`)
 - `delayDep` — retard au départ → **utilisé par les alertes email**
 - `delayArr` — retard à l'arrivée
