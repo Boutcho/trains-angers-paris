@@ -138,6 +138,9 @@ async function getTrains(dir, key, opts = {}) {
 
     trains.push({
       trainNo: info.headsign || info.trip_short_name || "—",
+      // type de train tel que nommé par la SNCF (ex. "TGV INOUI", "OUIGO", "TER")
+      commercialMode: info.commercial_mode || null,
+      physicalMode: info.physical_mode || null,
       // départ
       baseTime: baseDep,
       realTime: realDep,
