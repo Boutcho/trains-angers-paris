@@ -39,9 +39,37 @@ module.exports = async function handler(req, res) {
   const RESEND_KEY = process.env.RESEND_API_KEY;
   const FROM = process.env.ALERT_FROM || "onboarding@resend.dev";
   const TO = (process.env.ALERT_TO || "").split(",").map(s => s.trim()).filter(Boolean);
+  const NTFY_TOPIC = process.env.NTFY_TOPIC;
+  const NTFY_SERVER = process.env.NTFY_SERVER || "https://ntfy.sh";
 
   if (!KEY || !RESEND_KEY || !TO.length) {
     res.status(500).json({ error: "Configuration incomplète (clé SNCF, clé Resend ou destinataires)." });
+    return;
+  }
+
+  // --- MODE TEST : ?test=1 force l'envoi d'une alerte de démonstration sur les
+  //     deux canaux et renvoie le détail de chacun (diagnostic). Le secret
+  //     reste exigé (on est déjà passé le contrôle d'autorisation ci-dessus). ---
+  let isTest = false;
+  try { isTest = new URL(req.url, "http://x").searchParams.get("test") === "1"; } catch (_) {}
+  if (isTest) {
+    const d = new Date(Date.now() + 60 * 60 * 1000);
+    const p = n => String(n).padStart(2, "0");
+    const baseTime = `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}T${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+    const demo = { dir: "angers-paris", trainNo: "TEST", baseTime, delayDep: 20, delayArr: 20, delayG30: 20, cause: "Test de configuration (a ignorer)", cancelled: false, uid: "test" };
+    const result = {
+      test: true,
+      config: { from: FROM, destinataires: TO.length, resendKey: !!RESEND_KEY, sncfKey: !!KEY, ntfyTopic: !!NTFY_TOPIC },
+    };
+    try { await sendEmail(RESEND_KEY, FROM, TO, [demo]); result.email = { ok: true }; }
+    catch (e) { result.email = { ok: false, detail: e.message }; }
+    if (NTFY_TOPIC) {
+      try { await sendPush(NTFY_SERVER, NTFY_TOPIC, [demo]); result.push = { ok: true }; }
+      catch (e) { result.push = { ok: false, detail: e.message }; }
+    } else {
+      result.push = { ok: false, detail: "NTFY_TOPIC absent des variables Vercel" };
+    }
+    res.status(200).json(result);
     return;
   }
 
@@ -66,15 +94,15 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    // On envoie un email récapitulatif.
-    await sendEmail(RESEND_KEY, FROM, TO, alerts);
-
-    // On envoie aussi une notification push (ntfy), si elle est configurée.
-    // Absence de NTFY_TOPIC => on ne fait rien. Un échec push ne doit jamais
-    // faire échouer l'alerte email : on l'attrape sans relancer d'erreur.
-    let push = false;
-    const NTFY_TOPIC = process.env.NTFY_TOPIC;
-    const NTFY_SERVER = process.env.NTFY_SERVER || "https://ntfy.sh";
+    // Envoi sur les deux canaux, INDÉPENDAMMENT : l'échec de l'un ne doit
+    // jamais empêcher l'autre. On rapporte le résultat de chacun.
+    let email = false, push = false;
+    try {
+      await sendEmail(RESEND_KEY, FROM, TO, alerts);
+      email = true;
+    } catch (e) {
+      console.error("Alerte email échouée :", e.message);
+    }
     if (NTFY_TOPIC) {
       try {
         await sendPush(NTFY_SERVER, NTFY_TOPIC, alerts);
@@ -84,7 +112,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    res.status(200).json({ ok: true, sent: alerts.length, push });
+    res.status(200).json({ ok: true, sent: alerts.length, email, push });
   } catch (e) {
     res.status(502).json({ error: e.message || "Erreur pendant la vérification." });
   }
@@ -142,6 +170,7 @@ async function sendEmail(apiKey, from, to, alerts) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ from, to, subject, html }),
+    signal: AbortSignal.timeout(8000),
   });
 
   if (!resp.ok) {
@@ -188,6 +217,7 @@ async function sendPush(server, topic, alerts) {
       tags: ["bullettrain_side"],
       click: "https://trains-angers-paris.vercel.app/",
     }),
+    signal: AbortSignal.timeout(8000),
   });
 
   if (!resp.ok) {
