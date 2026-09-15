@@ -99,7 +99,8 @@ l'interface et dans les emails.
   _storage.js      Lecture/écriture du carnet mensuel dans Upstash
   departures.js    Alimente le tableau de bord temps réel
   trajets.js       API du carnet mensuel (ajout, correction, resynchronisation)
-  check-delays.js  Vérificateur d'alertes email (appelé par cron-job.org)
+  check-delays.js  Vérificateur d'alertes email + push (appelé par cron-job.org)
+  config.js        API de configuration des notifications (plage d'envoi + pause)
 /public
   index.html       Toute l'interface (2 vues : temps réel + suivi mensuel)
 vercel.json        Configuration Vercel
@@ -229,6 +230,22 @@ Colonnes : `Sens | Départ prévu | Train | État | Cause | Réservable`
 Déclenchement : retard **au départ** > 15 min, ou train supprimé.
 Anti-spam : un même train n'est signalé qu'une fois (mémoire en RAM — voir
 limites ci-dessous).
+
+### Configuration des notifications (plage d'envoi + pause)
+Une config unique est stockée dans Upstash sous la clé `config:notifications`
+(voir `_storage.js` : `lireConfig`/`ecrireConfig`), modifiable depuis l'onglet
+**« Réglages »** de la page via l'API `config.js` (`GET`/`POST /api/config`).
+- `plageActive` (bool) + `jours` (ISO 1=lundi…7=dimanche) : si actif, les alertes
+  ne partent QUE les jours cochés (défaut lun→jeu, car réservation possible
+  seulement du lundi au jeudi).
+- `pauseJusquau` ("AAAA-MM-JJ", date **incluse**) : met TOUTES les alertes en
+  pause jusqu'à cette date (utile quand le quota de Points Prime est atteint).
+
+`check-delays.js` relit cette config avant d'envoyer (`alertesAutorisees`) et
+calcule le jour/date **à l'heure de Paris** (`parisInfos`, via `Europe/Paris` —
+le serveur Vercel tourne en UTC). Le **mode test** (`?test=1`) ignore ces
+réglages. En cas d'erreur de lecture de la config, on n'empêche pas les alertes
+(on préfère un doublon rare à un silence total).
 
 ### Notifications push (ntfy)
 En plus de l'email, `check-delays.js` envoie une notification push via **ntfy**

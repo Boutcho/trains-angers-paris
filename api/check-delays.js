@@ -20,6 +20,7 @@
 // ============================================================
 
 const { getTrains } = require("./_sncf");
+const { lireConfig } = require("./_storage");
 
 // Mémoire courte : uid de train -> déjà alerté ?
 const alreadyAlerted = new Set();
@@ -71,6 +72,20 @@ module.exports = async function handler(req, res) {
     }
     res.status(200).json(result);
     return;
+  }
+
+  // --- Respect de la configuration : pause complète + jours d'envoi ---
+  // (le mode test ci-dessus n'y est pas soumis). En cas d'erreur de lecture,
+  // on n'empêche PAS les alertes (on préfère un doublon rare à un silence total).
+  try {
+    const config = await lireConfig();
+    const verdict = alertesAutorisees(config);
+    if (!verdict.ok) {
+      res.status(200).json({ ok: true, sent: 0, skipped: verdict.raison });
+      return;
+    }
+  } catch (e) {
+    console.error("Lecture config échouée, envoi sans restriction :", e.message);
   }
 
   const alerts = [];
@@ -224,6 +239,37 @@ async function sendPush(server, topic, alerts) {
     const detail = await resp.text().catch(() => "");
     throw new Error(`ntfy a répondu ${resp.status}. ${detail}`);
   }
+}
+
+// Jour ISO (1=lundi … 7=dimanche) et date "AAAA-MM-JJ" à l'heure de PARIS.
+// Indispensable : le serveur Vercel tourne en heure universelle (UTC), pas en
+// heure française. On demande donc explicitement le fuseau Europe/Paris.
+function parisInfos() {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "Europe/Paris",
+      weekday: "short", year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(new Date()).map(x => [x.type, x.value])
+  );
+  const jours = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+  return { isoDay: jours[p.weekday] || 0, dateStr: `${p.year}-${p.month}-${p.day}` };
+}
+
+// Décide si l'on a le droit d'envoyer des alertes maintenant, selon la config.
+function alertesAutorisees(config) {
+  const { isoDay, dateStr } = parisInfos();
+  // 1. Pause complète jusqu'à une date (incluse).
+  if (config.pauseJusquau && dateStr <= config.pauseJusquau) {
+    return { ok: false, raison: `en pause jusqu'au ${config.pauseJusquau}` };
+  }
+  // 2. Jours d'envoi (si la restriction est active).
+  if (config.plageActive) {
+    const jours = Array.isArray(config.jours) ? config.jours : [];
+    if (!jours.includes(isoDay)) {
+      return { ok: false, raison: "hors des jours d'envoi configurés" };
+    }
+  }
+  return { ok: true };
 }
 
 function fmtTime(s) {

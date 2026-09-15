@@ -110,6 +110,23 @@
   .trip-cause { font-size:12px; color:var(--ink-dim); margin-top:5px; }
   .trip-cause .cause-ico { color:var(--orange); font-style:normal; margin-right:4px; }
   .hint { font-size:12px; color:var(--ink-dim); background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--amber); padding:12px 14px; border-radius:8px; margin-bottom:16px; line-height:1.6; }
+
+  /* --- Vue Réglages --- */
+  .settings-toggle { display:flex; align-items:center; gap:10px; font-size:15px; font-weight:600; cursor:pointer; }
+  .settings-toggle input { width:18px; height:18px; accent-color:var(--amber); cursor:pointer; }
+  .settings-sub { margin:14px 0 2px; }
+  .settings-sub > .sub-label { display:block; color:var(--ink-dim); font-size:13px; margin-bottom:10px; }
+  .settings-desc { color:var(--ink-dim); font-size:12px; margin-top:10px; line-height:1.5; }
+  .days { display:flex; flex-wrap:wrap; gap:8px; }
+  .day-chip { display:inline-flex; align-items:center; gap:7px; background:var(--panel-2); border:1px solid var(--line); border-radius:9px; padding:9px 13px; font-size:13px; font-family:var(--mono); cursor:pointer; user-select:none; }
+  .day-chip:hover { border-color:var(--amber); }
+  .day-chip input { accent-color:var(--amber); cursor:pointer; margin:0; }
+  input[type="date"] { background:var(--panel-2); border:1px solid var(--line); color:var(--ink); padding:9px 12px; border-radius:9px; font-family:var(--mono); font-size:14px; color-scheme:dark; }
+  .settings-actions { display:flex; align-items:center; gap:14px; margin-top:4px; }
+  .save-btn { background:var(--amber); color:#1a1200; border:none; padding:11px 24px; border-radius:10px; font-size:14px; font-weight:700; cursor:pointer; }
+  .save-btn:hover { filter:brightness(1.08); }
+  .settings-status { font-size:13px; color:var(--green); }
+  .settings-status.err { color:var(--red); }
   .hidden { display:none; }
 </style>
 </head>
@@ -124,6 +141,7 @@
   <nav class="mainnav">
     <button class="navtab active" data-view="live">Trains en direct</button>
     <button class="navtab" data-view="month">Mon suivi mensuel</button>
+    <button class="navtab" data-view="settings">Réglages</button>
   </nav>
 
   <!-- ===================== VUE 1 : TRAINS EN DIRECT ===================== -->
@@ -196,6 +214,44 @@
     </div>
     <footer>Le retard d'arrivée SNCF se met à jour tout seul tant que le train n'est pas arrivé. Ta valeur corrigée, si tu en saisis une, prime toujours. Laisse vide pour garder la valeur SNCF.</footer>
   </section>
+
+  <!-- ===================== VUE 3 : RÉGLAGES ===================== -->
+  <section id="view-settings" class="hidden">
+    <div class="hint">
+      Ces réglages pilotent l'envoi des <strong>alertes email et push</strong>.
+      Ils n'affectent pas l'affichage du tableau de bord. Heure de référence : Paris.
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div class="k">⏸️ Mettre les alertes en pause</div>
+      <label class="settings-toggle"><input type="checkbox" id="pauseEnabled"> Suspendre toutes les alertes</label>
+      <div id="pauseDateRow" class="settings-sub hidden">
+        <span class="sub-label">Jusqu'au (date incluse) :</span>
+        <input type="date" id="pauseDate">
+      </div>
+      <div class="settings-desc">Idéal quand votre quota de Points Prime est atteint : aucune alerte (mail ni push) ne partira jusqu'à la date choisie. La reprise est automatique le lendemain.</div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div class="k">📅 Jours d'envoi des alertes</div>
+      <label class="settings-toggle"><input type="checkbox" id="plageEnabled"> Limiter les alertes à certains jours</label>
+      <div id="joursRow" class="settings-sub hidden">
+        <span class="sub-label">Cochez les jours où vous voulez recevoir les alertes :</span>
+        <div class="days" id="daysContainer"></div>
+      </div>
+      <div class="settings-desc" id="plageOffDesc">Actuellement : alertes envoyées <strong>tous les jours</strong> (7j/7).</div>
+    </div>
+
+    <div class="settings-actions">
+      <button class="save-btn" id="saveSettings">Enregistrer</button>
+      <span id="settingsStatus" class="settings-status"></span>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div class="k">État actuel du service</div>
+      <div id="settingsSummary" style="line-height:1.7;">…</div>
+    </div>
+  </section>
 </div>
 
 <script>
@@ -217,7 +273,9 @@ document.querySelectorAll(".navtab").forEach(t => {
     const v = t.dataset.view;
     document.getElementById("view-live").classList.toggle("hidden", v !== "live");
     document.getElementById("view-month").classList.toggle("hidden", v !== "month");
+    document.getElementById("view-settings").classList.toggle("hidden", v !== "settings");
     if (v === "month") loadMonth();
+    if (v === "settings") loadConfig();
   });
 });
 
@@ -558,6 +616,121 @@ async function removeTrip(id) {
     savedIds = new Set((data.trajets||[]).map(t => t.id));
   } catch(e) { alert("Suppression impossible."); }
 }
+
+// ============ VUE RÉGLAGES ============
+const JOURS = [[1,"Lun"],[2,"Mar"],[3,"Mer"],[4,"Jeu"],[5,"Ven"],[6,"Sam"],[7,"Dim"]];
+const JOURS_NOM = {1:"Lun",2:"Mar",3:"Mer",4:"Jeu",5:"Ven",6:"Sam",7:"Dim"};
+
+// Construit les cases à cocher des jours (une seule fois).
+function buildDayChips() {
+  const box = document.getElementById("daysContainer");
+  if (box.children.length) return;
+  box.innerHTML = JOURS.map(([n,lbl]) =>
+    `<label class="day-chip"><input type="checkbox" class="day-cb" value="${n}">${lbl}</label>`
+  ).join("");
+}
+
+function settingsToggleRows() {
+  const plageOn = document.getElementById("plageEnabled").checked;
+  const pauseOn = document.getElementById("pauseEnabled").checked;
+  document.getElementById("joursRow").classList.toggle("hidden", !plageOn);
+  document.getElementById("plageOffDesc").classList.toggle("hidden", plageOn);
+  document.getElementById("pauseDateRow").classList.toggle("hidden", !pauseOn);
+}
+
+function setSettingsStatus(msg, isError) {
+  const el = document.getElementById("settingsStatus");
+  el.textContent = msg || "";
+  el.classList.toggle("err", !!isError);
+}
+
+// Formate "2026-10-15" -> "jeudi 15 octobre 2026"
+function fmtDateISO(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("fr-FR", { weekday:"long", day:"numeric", month:"long", year:"numeric" });
+}
+
+function applyConfigToForm(c) {
+  buildDayChips();
+  document.getElementById("plageEnabled").checked = !!c.plageActive;
+  const jours = new Set((c.jours || []).map(Number));
+  document.querySelectorAll(".day-cb").forEach(cb => { cb.checked = jours.has(Number(cb.value)); });
+  document.getElementById("pauseEnabled").checked = !!c.pauseJusquau;
+  document.getElementById("pauseDate").value = c.pauseJusquau || "";
+  document.getElementById("pauseDate").min = new Date().toISOString().slice(0,10);
+  settingsToggleRows();
+  renderSettingsSummary(c);
+}
+
+function renderSettingsSummary(c) {
+  const el = document.getElementById("settingsSummary");
+  const today = new Date().toISOString().slice(0,10);
+  const lignes = [];
+  if (c.pauseJusquau && today <= c.pauseJusquau) {
+    lignes.push(`⏸️ <strong style="color:var(--orange)">En pause</strong> jusqu'au ${fmtDateISO(c.pauseJusquau)} (inclus).`);
+    lignes.push(`Aucune alerte ne sera envoyée d'ici là.`);
+  } else {
+    if (c.plageActive) {
+      const noms = (c.jours || []).slice().sort((a,b)=>a-b).map(n => JOURS_NOM[n]).join(", ");
+      lignes.push(`📅 Alertes envoyées uniquement : <strong>${noms || "aucun jour (⚠ rien ne partira)"}</strong>.`);
+    } else {
+      lignes.push(`📅 Alertes envoyées <strong>tous les jours</strong> (7j/7).`);
+    }
+    lignes.push(`✅ Service <strong style="color:var(--green)">actif</strong>.`);
+  }
+  el.innerHTML = lignes.join("<br>");
+}
+
+function collectConfig() {
+  return {
+    plageActive: document.getElementById("plageEnabled").checked,
+    jours: Array.from(document.querySelectorAll(".day-cb")).filter(cb => cb.checked).map(cb => Number(cb.value)),
+    pauseJusquau: (document.getElementById("pauseEnabled").checked && document.getElementById("pauseDate").value)
+      ? document.getElementById("pauseDate").value : null,
+  };
+}
+
+async function loadConfig() {
+  buildDayChips();
+  try {
+    const res = await fetch("/api/config");
+    const c = await res.json();
+    applyConfigToForm(c);
+    setSettingsStatus("", false);
+  } catch (e) {
+    setSettingsStatus("Impossible de charger les réglages.", true);
+  }
+}
+
+async function saveConfig() {
+  // Garde-fous avant enregistrement
+  if (document.getElementById("pauseEnabled").checked && !document.getElementById("pauseDate").value) {
+    setSettingsStatus("Choisissez une date de fin de pause.", true); return;
+  }
+  const cfg = collectConfig();
+  if (cfg.plageActive && cfg.jours.length === 0) {
+    setSettingsStatus("Cochez au moins un jour, ou désactivez la limite.", true); return;
+  }
+  try {
+    setSettingsStatus("Enregistrement…", false);
+    const res = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: cfg }),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const saved = await res.json();
+    applyConfigToForm(saved);
+    setSettingsStatus("✓ Réglages enregistrés.", false);
+  } catch (e) {
+    setSettingsStatus("Échec de l'enregistrement. Réessayez.", true);
+  }
+}
+
+document.getElementById("plageEnabled").addEventListener("change", settingsToggleRows);
+document.getElementById("pauseEnabled").addEventListener("change", settingsToggleRows);
+document.getElementById("saveSettings").addEventListener("click", saveConfig);
 
 // ============ DÉMARRAGE ============
 buildMonthPicker();

@@ -124,8 +124,60 @@ function retardRetenu(trajet) {
   return Number(trajet.delaySncf) || 0;
 }
 
+// ============================================================
+//  CONFIGURATION DES NOTIFICATIONS (plage d'envoi + pause)
+// ------------------------------------------------------------
+//  Stockée sous une clé unique, relue par le vérificateur d'alertes.
+//    plageActive   : false => alertes 7j/7 ; true => seulement les jours cochés
+//    jours         : jours autorisés en ISO (1=lundi … 7=dimanche)
+//    pauseJusquau  : "AAAA-MM-JJ" (date incluse) => tout en pause, ou null
+// ============================================================
+const CLE_CONFIG = "config:notifications";
+const CONFIG_DEFAUT = {
+  plageActive: false,
+  jours: [1, 2, 3, 4], // lundi -> jeudi par défaut
+  pauseJusquau: null,
+};
+
+// Nettoie/complète une config (robuste si un champ manque ou est invalide).
+function normaliserConfig(brut) {
+  const c = (brut && typeof brut === "object") ? brut : {};
+  let jours;
+  if (Array.isArray(c.jours)) {
+    // Une liste vide explicite est respectée (= aucun jour autorisé).
+    jours = Array.from(new Set(
+      c.jours.map(Number).filter(n => Number.isInteger(n) && n >= 1 && n <= 7)
+    )).sort();
+  } else {
+    jours = CONFIG_DEFAUT.jours.slice();
+  }
+  const pause = (typeof c.pauseJusquau === "string" && /^\d{4}-\d{2}-\d{2}$/.test(c.pauseJusquau))
+    ? c.pauseJusquau : null;
+  return { plageActive: Boolean(c.plageActive), jours, pauseJusquau: pause };
+}
+
+async function lireConfig() {
+  if (!upstashConfigure()) {
+    return normaliserConfig(memoireLocale[CLE_CONFIG]);
+  }
+  const raw = await redis(["GET", CLE_CONFIG]);
+  if (!raw) return normaliserConfig(null);
+  try { return normaliserConfig(JSON.parse(raw)); } catch { return normaliserConfig(null); }
+}
+
+async function ecrireConfig(config) {
+  const propre = normaliserConfig(config);
+  if (!upstashConfigure()) {
+    memoireLocale[CLE_CONFIG] = propre;
+    return propre;
+  }
+  await redis(["SET", CLE_CONFIG, JSON.stringify(propre)]);
+  return propre;
+}
+
 module.exports = {
   lireMois, ajouterTrajet, supprimerTrajet, corrigerRetard,
   rafraichirRetardSncf, retardRetenu, upstashConfigure,
   ecrireMoisPublic: ecrireMois,
+  lireConfig, ecrireConfig,
 };
